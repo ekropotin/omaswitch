@@ -121,6 +121,7 @@ Item {
   function select(delta) {
     if (rows.length === 0) return
     selectedIndex = (selectedIndex + delta + rows.length) % rows.length
+    keepSelectionVisible.restart()
   }
 
   function open(payloadJson) {
@@ -187,6 +188,18 @@ Item {
     }
   }
 
+  // Do not bind ListView.currentIndex here. On Qt 6.11, changing that binding
+  // while a JavaScript array model is creating delegates can crash Qt. The
+  // row already draws its own selected state, so only coalesce scroll requests.
+  Timer {
+    id: keepSelectionVisible
+    interval: 0
+    onTriggered: {
+      if (root.opened && root.selectedIndex >= 0 && root.selectedIndex < root.rows.length)
+        listView.positionViewAtIndex(root.selectedIndex, ListView.Contain)
+    }
+  }
+
   PanelWindow {
     id: panel
     visible: root.opened
@@ -240,7 +253,6 @@ Item {
             width: parent.width
             height: root.listHeight
             model: root.rows
-            currentIndex: root.selectedIndex
             clip: true
 
             Text {
@@ -255,8 +267,6 @@ Item {
             }
 
             delegate: Item {
-              required property var modelData
-              required property int index
               width: listView.width
               height: root.rowHeight
 
