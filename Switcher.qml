@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Hyprland
+import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
@@ -30,6 +31,8 @@ Item {
   // openPanelIds; we must not fight it, so `opened` is only our UI state.
   property bool opened: false
   property bool cycleMode: false
+  property var mruAddresses: []
+  property var pendingMruPromotions: []
   property string filterText: ""
   property int selectedIndex: 0
 
@@ -88,8 +91,19 @@ Item {
   }
 
   function refresh() {
-    allWindows = Model.sortedWindows(Hyprland.toplevels.values)
+    allWindows = Model.sortedWindows(Hyprland.toplevels.values, root.mruAddresses)
     rebuildRows()
+  }
+
+  function seedMru(text) {
+    var clients = []
+    try { clients = JSON.parse(text || "[]") } catch (e) { clients = [] }
+    var seeded = Model.addressesByHistory(clients)
+    for (var i = root.pendingMruPromotions.length - 1; i >= 0; i--)
+      seeded = Model.promoteAddress(seeded, root.pendingMruPromotions[i])
+    root.pendingMruPromotions = []
+    root.mruAddresses = seeded
+    if (root.opened) root.refresh()
   }
 
   function focusSelected() {
@@ -148,12 +162,28 @@ Item {
   Connections {
     target: Hyprland
     function onRawEvent(event) {
-      if (!root.opened) return
       var name = event ? String(event.name || "") : ""
+      if (name === "activewindowv2") {
+        var address = event ? String(event.data || "") : ""
+        root.mruAddresses = Model.promoteAddress(root.mruAddresses, address)
+        if (mruSeedProcess.running)
+          root.pendingMruPromotions = Model.promoteAddress(root.pendingMruPromotions, address)
+      }
+      if (!root.opened) return
       if (name === "activewindow" || name === "closewindow" || name === "openwindow" ||
           name === "workspace" || name === "movewindow" || name.indexOf("windowtitle") === 0) {
         root.refresh()
       }
+    }
+  }
+
+  Process {
+    id: mruSeedProcess
+    command: ["hyprctl", "clients", "-j"]
+    running: true
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.seedMru(text)
     }
   }
 
