@@ -129,16 +129,37 @@ Item {
     if (root.opened) root.refresh()
   }
 
-  function focusSelected() {
-    var window = rows[selectedIndex]
-    if (!window) return root.dismiss()
+  property var pendingFocus: null
+
+  function applyPendingFocus() {
+    var window = root.pendingFocus
+    if (!window) return
+    root.pendingFocus = null
+    pendingFocusBackstop.stop()
     var command = Model.focusCommand(window)
     if (command) {
       Quickshell.execDetached(["sh", "-c", command])
     } else if (window.wayland && typeof window.wayland.activate === "function") {
       window.wayland.activate()
     }
+  }
+
+  Timer {
+    id: pendingFocusBackstop
+    interval: 250
+    repeat: false
+    onTriggered: root.applyPendingFocus()
+  }
+
+  // Hyprland hands keyboard focus back to the previously focused toplevel when
+  // this overlay's layer surface unmaps, so focusing while still mapped is
+  // undone by that restore. Dismiss first, apply once the restore has landed.
+  function focusSelected() {
+    var window = rows[selectedIndex]
+    if (!window) return root.dismiss()
+    root.pendingFocus = window
     root.dismiss()
+    pendingFocusBackstop.restart()
   }
 
   function select(delta) {
@@ -195,6 +216,12 @@ Item {
         root.mruAddresses = Model.promoteAddress(root.mruAddresses, address)
         if (mruSeedProcess.running)
           root.pendingMruPromotions = Model.promoteAddress(root.pendingMruPromotions, address)
+        // The compositor's post-unmap focus restore is the cue to apply a
+        // pending selection; applying before it would simply be overwritten.
+        if (root.pendingFocus) {
+          root.applyPendingFocus()
+          return
+        }
       }
       if (!root.opened) return
       if (name === "activewindow" || name === "closewindow" || name === "openwindow" ||
