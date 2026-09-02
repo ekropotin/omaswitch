@@ -33,6 +33,7 @@ Item {
   property bool cycleMode: false
   property var mruAddresses: []
   property var pendingMruPromotions: []
+  property bool previewAvailable: false
   property string filterText: ""
   property int selectedIndex: 0
 
@@ -50,7 +51,29 @@ Item {
   // rebuildRows() gets to clamp selectedIndex.
   readonly property var selectedToplevel: selectedIndex >= 0 && selectedIndex < rows.length ? rows[selectedIndex] : null
   readonly property bool previewWanted: root.opened && root.selectedToplevel !== null && !!root.selectedToplevel.wayland
-  readonly property bool previewActive: root.previewWanted && previewView.hasContent
+  // Keep the preview layout stable after the first frame arrives. Changing
+  // captureSource briefly clears hasContent; collapsing the pane during that
+  // gap makes the whole switcher visibly flash on every cycle.
+  readonly property bool previewActive: root.previewWanted && (root.previewAvailable || previewView.hasContent)
+
+  onSelectedToplevelChanged: {
+    if (!root.previewWanted) {
+      root.previewAvailable = false
+      previewFallbackTimer.stop()
+    } else if (root.previewAvailable) {
+      // Preserve the current geometry while the new capture source starts,
+      // but still allow the list-only fallback if it produces no frame.
+      previewFallbackTimer.restart()
+    }
+  }
+
+  Timer {
+    id: previewFallbackTimer
+    interval: 300
+    onTriggered: {
+      if (!previewView.hasContent) root.previewAvailable = false
+    }
+  }
 
   readonly property int cardWidth: Math.min(root.previewActive ? Style.space(1080) : Style.space(760), panel.width - Style.gapsOut * 2)
   readonly property int desiredListHeight: Math.max(root.rowHeight, rows.length * root.rowHeight)
@@ -138,6 +161,7 @@ Item {
 
     root.opened = true
     root.cycleMode = payload.mode === "cycle"
+    root.previewAvailable = false
     root.filterText = ""
     root.selectedIndex = 0
     root.refresh()
@@ -149,12 +173,14 @@ Item {
   function close() {
     root.opened = false
     root.cycleMode = false
+    root.previewAvailable = false
   }
 
   // User-initiated dismissal also drops the host's openPanelIds entry.
   function dismiss() {
     root.opened = false
     root.cycleMode = false
+    root.previewAvailable = false
     if (root.shell && typeof root.shell.hide === "function")
       root.shell.hide((root.manifest && root.manifest.id) || "piyush.omaswitch")
   }
@@ -331,6 +357,12 @@ Item {
             live: root.previewWanted
             paintCursor: false
             constraintSize: Qt.size(root.previewConstraintWidth, root.previewConstraintHeight)
+            onHasContentChanged: {
+              if (hasContent) {
+                root.previewAvailable = true
+                previewFallbackTimer.stop()
+              }
+            }
           }
         }
       }
