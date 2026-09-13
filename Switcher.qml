@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Hyprland
+import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
@@ -30,6 +31,9 @@ Item {
   // openPanelIds; we must not fight it, so `opened` is only our UI state.
   property bool opened: false
   property bool cycleMode: false
+  property var mruAddresses: []
+  property var pendingMruPromotions: []
+  property bool previewAvailable: false
   property string filterText: ""
   property int selectedIndex: 0
 
@@ -47,7 +51,29 @@ Item {
   // rebuildRows() gets to clamp selectedIndex.
   readonly property var selectedToplevel: selectedIndex >= 0 && selectedIndex < rows.length ? rows[selectedIndex] : null
   readonly property bool previewWanted: root.opened && root.selectedToplevel !== null && !!root.selectedToplevel.wayland
-  readonly property bool previewActive: root.previewWanted && previewView.hasContent
+  // Keep the preview layout stable after the first frame arrives. Changing
+  // captureSource briefly clears hasContent; collapsing the pane during that
+  // gap makes the whole switcher visibly flash on every cycle.
+  readonly property bool previewActive: root.previewWanted && (root.previewAvailable || previewView.hasContent)
+
+  onSelectedToplevelChanged: {
+    if (!root.previewWanted) {
+      root.previewAvailable = false
+      previewFallbackTimer.stop()
+    } else if (root.previewAvailable) {
+      // Preserve the current geometry while the new capture source starts,
+      // but still allow the list-only fallback if it produces no frame.
+      previewFallbackTimer.restart()
+    }
+  }
+
+  Timer {
+    id: previewFallbackTimer
+    interval: 300
+    onTriggered: {
+      if (!previewView.hasContent) root.previewAvailable = false
+    }
+  }
 
   readonly property int cardWidth: Math.min(root.previewActive ? Style.space(1080) : Style.space(760), panel.width - Style.gapsOut * 2)
   readonly property int desiredListHeight: Math.max(root.rowHeight, rows.length * root.rowHeight)
@@ -88,25 +114,58 @@ Item {
   }
 
   function refresh() {
-    allWindows = Model.sortedWindows(Hyprland.toplevels.values)
+    allWindows = Model.sortedWindows(Hyprland.toplevels.values, root.mruAddresses)
     rebuildRows()
   }
 
-  function focusSelected() {
-    var window = rows[selectedIndex]
-    if (!window) return root.dismiss()
+  function seedMru(text) {
+    var clients = []
+    try { clients = JSON.parse(text || "[]") } catch (e) { clients = [] }
+    var seeded = Model.addressesByHistory(clients)
+    for (var i = root.pendingMruPromotions.length - 1; i >= 0; i--)
+      seeded = Model.promoteAddress(seeded, root.pendingMruPromotions[i])
+    root.pendingMruPromotions = []
+    root.mruAddresses = seeded
+    if (root.opened) root.refresh()
+  }
+
+  property var pendingFocus: null
+
+  function applyPendingFocus() {
+    var window = root.pendingFocus
+    if (!window) return
+    root.pendingFocus = null
+    pendingFocusBackstop.stop()
     var command = Model.focusCommand(window)
     if (command) {
       Quickshell.execDetached(["sh", "-c", command])
     } else if (window.wayland && typeof window.wayland.activate === "function") {
       window.wayland.activate()
     }
+  }
+
+  Timer {
+    id: pendingFocusBackstop
+    interval: 250
+    repeat: false
+    onTriggered: root.applyPendingFocus()
+  }
+
+  // Hyprland hands keyboard focus back to the previously focused toplevel when
+  // this overlay's layer surface unmaps, so focusing while still mapped is
+  // undone by that restore. Dismiss first, apply once the restore has landed.
+  function focusSelected() {
+    var window = rows[selectedIndex]
+    if (!window) return root.dismiss()
+    root.pendingFocus = window
     root.dismiss()
+    pendingFocusBackstop.restart()
   }
 
   function select(delta) {
     if (rows.length === 0) return
     selectedIndex = (selectedIndex + delta + rows.length) % rows.length
+    keepSelectionVisible.restart()
   }
 
   function open(payloadJson) {
@@ -123,6 +182,7 @@ Item {
 
     root.opened = true
     root.cycleMode = payload.mode === "cycle"
+    root.previewAvailable = false
     root.filterText = ""
     root.selectedIndex = 0
     root.refresh()
@@ -134,12 +194,14 @@ Item {
   function close() {
     root.opened = false
     root.cycleMode = false
+    root.previewAvailable = false
   }
 
   // User-initiated dismissal also drops the host's openPanelIds entry.
   function dismiss() {
     root.opened = false
     root.cycleMode = false
+    root.previewAvailable = false
     if (root.shell && typeof root.shell.hide === "function")
       root.shell.hide((root.manifest && root.manifest.id) || "piyush.omaswitch")
   }
@@ -148,12 +210,46 @@ Item {
   Connections {
     target: Hyprland
     function onRawEvent(event) {
-      if (!root.opened) return
       var name = event ? String(event.name || "") : ""
+      if (name === "activewindowv2") {
+        var address = event ? String(event.data || "") : ""
+        root.mruAddresses = Model.promoteAddress(root.mruAddresses, address)
+        if (mruSeedProcess.running)
+          root.pendingMruPromotions = Model.promoteAddress(root.pendingMruPromotions, address)
+        // The compositor's post-unmap focus restore is the cue to apply a
+        // pending selection; applying before it would simply be overwritten.
+        if (root.pendingFocus) {
+          root.applyPendingFocus()
+          return
+        }
+      }
+      if (!root.opened) return
       if (name === "activewindow" || name === "closewindow" || name === "openwindow" ||
           name === "workspace" || name === "movewindow" || name.indexOf("windowtitle") === 0) {
         root.refresh()
       }
+    }
+  }
+
+  Process {
+    id: mruSeedProcess
+    command: ["hyprctl", "clients", "-j"]
+    running: true
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.seedMru(text)
+    }
+  }
+
+  // Do not bind ListView.currentIndex here. On Qt 6.11, changing that binding
+  // while a JavaScript array model is creating delegates can crash Qt. The
+  // row already draws its own selected state, so only coalesce scroll requests.
+  Timer {
+    id: keepSelectionVisible
+    interval: 0
+    onTriggered: {
+      if (root.opened && root.selectedIndex >= 0 && root.selectedIndex < root.rows.length)
+        listView.positionViewAtIndex(root.selectedIndex, ListView.Contain)
     }
   }
 
@@ -210,7 +306,6 @@ Item {
             width: parent.width
             height: root.listHeight
             model: root.rows
-            currentIndex: root.selectedIndex
             clip: true
 
             Text {
@@ -225,8 +320,6 @@ Item {
             }
 
             delegate: Item {
-              required property var modelData
-              required property int index
               width: listView.width
               height: root.rowHeight
 
@@ -291,6 +384,12 @@ Item {
             live: root.previewWanted
             paintCursor: false
             constraintSize: Qt.size(root.previewConstraintWidth, root.previewConstraintHeight)
+            onHasContentChanged: {
+              if (hasContent) {
+                root.previewAvailable = true
+                previewFallbackTimer.stop()
+              }
+            }
           }
         }
       }

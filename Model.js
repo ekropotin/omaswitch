@@ -48,12 +48,50 @@ function focusRank(window) {
   return isCurrent(window) ? -1 : historyRank(window)
 }
 
-function sortedWindows(values) {
+function addressKey(value) {
+  var raw = value && typeof value === "object" ? value.address : value
+  if (raw === null || raw === undefined) return ""
+  return String(raw).toLowerCase().replace(/^0x/, "")
+}
+
+function promoteAddress(values, address) {
+  var key = addressKey(address)
+  var source = values && typeof values.slice === "function" ? values : []
+  if (!key) return source.slice()
+  var result = [key]
+  for (var i = 0; i < source.length; i++) {
+    var candidate = addressKey(source[i])
+    if (candidate && candidate !== key) result.push(candidate)
+  }
+  return result
+}
+
+function addressesByHistory(clients) {
+  var source = clients && typeof clients.slice === "function" ? clients.slice() : []
+  source.sort(function(left, right) {
+    return historyRank({ lastIpcObject: left }) - historyRank({ lastIpcObject: right })
+  })
+  var result = []
+  for (var i = 0; i < source.length; i++) {
+    var key = addressKey(source[i])
+    if (key && result.indexOf(key) === -1) result.push(key)
+  }
+  return result
+}
+
+function sortedWindows(values, mruAddresses) {
   var source = values && typeof values.slice === "function" ? values.slice() : []
+  var mru = {}
+  var order = mruAddresses && typeof mruAddresses.slice === "function" ? mruAddresses : []
+  for (var m = 0; m < order.length; m++) mru[addressKey(order[m])] = m
   var decorated = []
-  for (var i = 0; i < source.length; i++) decorated.push({ value: source[i], index: i })
+  for (var i = 0; i < source.length; i++) {
+    var key = addressKey(source[i])
+    var rank = key && mru[key] !== undefined ? mru[key] : 1000000 + focusRank(source[i])
+    decorated.push({ value: source[i], index: i, rank: rank })
+  }
   decorated.sort(function(left, right) {
-    return focusRank(left.value) - focusRank(right.value) || left.index - right.index
+    return left.rank - right.rank || left.index - right.index
   })
   var result = []
   for (var j = 0; j < decorated.length; j++) result.push(decorated[j].value)
@@ -87,6 +125,9 @@ if (typeof module !== "undefined") module.exports = {
   appId: appId,
   label: label,
   detail: detail,
+  addressKey: addressKey,
+  promoteAddress: promoteAddress,
+  addressesByHistory: addressesByHistory,
   isCurrent: isCurrent,
   sortedWindows: sortedWindows,
   filteredWindows: filteredWindows,
