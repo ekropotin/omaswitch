@@ -50,6 +50,23 @@ o.bind("ALT + TAB", "OmaSwitch", "omarchy-shell shell summon piyush.omaswitch '{
 o.bind("ALT + SHIFT + TAB", "OmaSwitch (reverse)", "omarchy-shell shell summon piyush.omaswitch '{\"mode\":\"cycle\",\"direction\":-1}'")
 ```
 
+The overlay commits on `Alt` release only if it already has keyboard focus, so a quick `Alt+Tab` can leave it open until `Enter`. To commit reliably, also let Hyprland report the release (a workaround until [quickshell#1205](https://github.com/quickshell-mirror/quickshell/issues/1205) lands):
+
+```lua
+local function omaswitch_commit()
+  for _, layer in ipairs(hl.get_layers()) do
+    if layer.namespace == "piyush-omaswitch" then
+      hl.exec_cmd("omarchy-shell shell call piyush.omaswitch commit ''")
+      return
+    end
+  end
+end
+for _, key in ipairs({ "ALT_L", "ALT_R" }) do
+  o.bind("ALT + " .. key, nil, omaswitch_commit,
+    { release = true, transparent = true, ignore_mods = true, non_consuming = true })
+end
+```
+
 Then reload Hyprland:
 
 ```bash

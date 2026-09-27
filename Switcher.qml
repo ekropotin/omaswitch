@@ -191,6 +191,17 @@ Item {
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
+  // Commit entry point for a compositor release bind on the cycle modifier:
+  // `omarchy-shell shell call piyush.omaswitch commit ''`. The overlay only
+  // sees the modifier release if it already holds keyboard focus; a quick
+  // Alt/Super+Tab can release before the surface maps, leaving it open.
+  // Idempotent, since the overlay may also have caught the release itself.
+  // Workaround until QML can read held modifiers on focus:
+  // https://github.com/quickshell-mirror/quickshell/issues/1205
+  function commit() {
+    if (root.opened && root.cycleMode) root.focusSelected()
+  }
+
   function close() {
     root.opened = false
     root.cycleMode = false
@@ -427,7 +438,8 @@ Item {
       // Best-effort native Alt-Tab behavior. If the compositor delivers the
       // modifier release after granting this overlay focus, commit selection.
       Keys.onReleased: function(event) {
-        if (root.cycleMode && (event.key === Qt.Key_Alt || event.key === Qt.Key_Meta)) {
+        if (root.cycleMode && (event.key === Qt.Key_Alt || event.key === Qt.Key_Meta ||
+                               event.key === Qt.Key_Super_L || event.key === Qt.Key_Super_R)) {
           root.focusSelected()
           event.accepted = true
         }
